@@ -1,1 +1,0 @@
-# Script to fetch and preprocess 28x28 images
