@@ -1,3 +1,6 @@
+# cnn.py - CNN model definitions and training function for 2D and 3D biomedical image classification.
+# This is where we define the CNN architectures for both 2D and 3D data, as well as the training loop. The train_cnn function will be called from the main training code to train the CNN on each dataset and evaluate its performance.
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,6 +8,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
 
+# For 2D data, we can use a simple CNN architecture with a few convolutional layers followed by fully connected layers. This should be sufficient for the relatively small and simple images in the medmnist datasets.
 class CNN2D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
@@ -33,6 +37,7 @@ class CNN2D(nn.Module):
         return self.classifier(self.features(x))
 
 
+# For 3D data, we can use a similar architecture but with 3D convolutional layers. This will allow us to capture spatial features across the depth dimension of the volumes.
 class CNN3D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
@@ -45,10 +50,11 @@ class CNN3D(nn.Module):
             nn.BatchNorm3d(64),
             nn.ReLU(),
             nn.MaxPool3d(2),
+            nn.AdaptiveAvgPool3d((1, 1, 1)),
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 7 * 7 * 7, 256),
+            nn.Linear(64, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, num_classes),
@@ -58,6 +64,7 @@ class CNN3D(nn.Module):
         return self.classifier(self.features(x))
 
 
+# The train_cnn function will handle the training loop, including data preparation, model training, and evaluation. It will return the predicted probabilities and class labels for the validation set, which can then be used to calculate AUC and accuracy.
 def prepare_tensors_2d(X, y=None, multi_label=False):
     X = np.asarray(X, dtype=np.float32) / 255.0
     if X.ndim == 3:
@@ -82,12 +89,16 @@ def prepare_tensors_2d(X, y=None, multi_label=False):
     return TensorDataset(X_tensor, y_tensor)
 
 
+# For 3D data, we need to ensure the input shape is correct for 3D convolutions. We also need to handle the labels similarly to the 2D case.
 def prepare_tensors_3d(X, y=None, multi_label=False):
     X = np.asarray(X, dtype=np.float32) / 255.0
+    
     if X.ndim == 4:
         X = np.expand_dims(X, axis=1)      # (N, 1, D, H, W)
-    else:
+    elif X.ndim == 5 and X.shape[-1] in (1, 3):
+        # Only transpose if channels are explicitly at the end (N, D, H, W, C)
         X = X.transpose(0, 4, 1, 2, 3)     # (N, C, D, H, W)
+    # If ndim == 5 and shape is (N, 1, 28, 28, 28), it's already in (N, C, D, H, W) format.
 
     X_tensor = torch.from_numpy(X)
 
@@ -106,6 +117,7 @@ def prepare_tensors_3d(X, y=None, multi_label=False):
     return TensorDataset(X_tensor, y_tensor)
 
 
+# The main training function for the CNN. This will be called from the main training code to train the CNN on each dataset and evaluate its performance. It returns the predicted probabilities and class labels for the validation set.
 def train_cnn(
     X_train,
     y_train,
@@ -128,8 +140,20 @@ def train_cnn(
 
     num_classes = y_train.shape[1] if multi_label else int(np.max(y_train)) + 1
 
+    # Infer the number of input channels for the CNN based on the shape of X_train. This is important for both 2D and 3D data, as the channel dimension can be in different positions depending on the dataset.
     if is_3d_data:
-        in_channels = 1 if X_train.ndim == 4 else X_train.shape[-1]
+        if X_train.ndim == 4:
+            in_channels = 1
+        elif X_train.ndim == 5:
+            if X_train.shape[1] in (1, 3):
+                in_channels = X_train.shape[1]
+            elif X_train.shape[-1] in (1, 3):
+                in_channels = X_train.shape[-1]
+            else:
+                raise ValueError(f"Cannot infer 3D channels from shape {X_train.shape}")
+        else:
+            raise ValueError(f"Unsupported 3D input shape: {X_train.shape}")
+
         model = CNN3D(in_channels, num_classes).to(device)
         train_ds = prepare_tensors_3d(X_train, y_train, multi_label=multi_label)
         val_ds = prepare_tensors_3d(X_val, y_val, multi_label=multi_label)
@@ -139,6 +163,7 @@ def train_cnn(
         train_ds = prepare_tensors_2d(X_train, y_train, multi_label=multi_label)
         val_ds = prepare_tensors_2d(X_val, y_val, multi_label=multi_label)
 
+    # We set num_workers=0 here to avoid issues with multiprocessing on Windows. If you are running this code on Linux or macOS, you can set num_workers to a higher value (e.g., 4) to speed up data loading.
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -159,6 +184,7 @@ def train_cnn(
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
+    # Training loop
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -187,6 +213,7 @@ def train_cnn(
     all_probs = []
     all_preds = []
 
+    # We use torch.inference_mode() here to disable gradient tracking and reduce memory usage during evaluation. This is important for larger models and datasets, especially when running on a GPU.
     with torch.inference_mode():
         for X_batch, _ in val_loader:
             X_batch = X_batch.to(device, non_blocking=True)

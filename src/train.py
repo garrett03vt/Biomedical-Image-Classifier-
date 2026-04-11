@@ -6,6 +6,7 @@ import time
 import warnings
 import numpy as np
 import joblib
+import winsound
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -28,6 +29,7 @@ warnings.filterwarnings("ignore", category=ConvergenceWarning)
 MODELS_DIR = "models"
 
 
+# Utility functions for saving/loading results, normalizing labels, computing AUC, and training classical models. These are used in the main training loop to evaluate different methods and keep track of results across datasets.
 def save_results(data_flag, auc, acc, best_method, duration):
     os.makedirs(MODELS_DIR, exist_ok=True)
     joblib.dump(
@@ -36,15 +38,18 @@ def save_results(data_flag, auc, acc, best_method, duration):
     )
 
 
+# Load results from a saved file to avoid retraining models if results are already available.
 def load_results(data_flag):
     r = joblib.load(f"{MODELS_DIR}/{data_flag}_results.joblib")
     return r["auc"], r["acc"], r["method"], r["duration"]
 
 
+# Check if results for a given dataset flag already exist. 
 def already_trained(data_flag):
     return os.path.exists(f"{MODELS_DIR}/{data_flag}_results.joblib")
 
 
+# The main training loop for a single dataset. This function loads the dataset, extracts features, trains both classical models and a CNN, evaluates their performance, and saves the best results. It also handles exceptions and prints out progress and results in a readable format.
 def normalize_labels(y):
     y = np.asarray(y)
     if y.ndim == 2 and y.shape[1] == 1:
@@ -52,11 +57,13 @@ def normalize_labels(y):
     return y
 
 
+# Check if the target labels are multi-label or single-label. This is important for choosing the right evaluation metrics and model configurations.
 def is_multi_label_target(y):
     y = np.asarray(y)
     return y.ndim == 2 and y.shape[1] > 1
 
 
+# Compute AUC for both multi-label and single-label classification. For multi-label, we use macro averaging. For single-label, we handle both binary and multi-class cases appropriately.
 def compute_auc(y_true, y_probs, multi_label):
     y_true = np.asarray(y_true)
 
@@ -72,6 +79,7 @@ def compute_auc(y_true, y_probs, multi_label):
     return roc_auc_score(y_true, y_probs, multi_class="ovr", average="macro")
 
 
+# This function handles the training of both logistic regression and random forest models for a given set of features. It returns the predicted probabilities and class labels for the validation set, which are then used to compute AUC and accuracy.
 def probs_from_model(clf, Xva, multi_label):
     probs = clf.predict_proba(Xva)
     if multi_label:
@@ -80,6 +88,7 @@ def probs_from_model(clf, Xva, multi_label):
     return probs
 
 
+# The train_logistic function trains a logistic regression model on the given features and returns the predicted probabilities and class labels for the validation set. It handles both multi-label and single-label cases, and uses a pipeline to standardize features before training.
 def train_logistic(Xtr, y_train, Xva, multi_label, max_iter):
     print("    Training logistic regression...")
 
@@ -124,6 +133,7 @@ def train_logistic(Xtr, y_train, Xva, multi_label, max_iter):
     return probs, preds
 
 
+#
 def train_random_forest(Xtr, y_train, Xva, multi_label):
     print("    Training random forest...")
 
@@ -145,6 +155,7 @@ def train_random_forest(Xtr, y_train, Xva, multi_label):
     return probs, preds
 
 
+# The extract_features function is a wrapper around the feature extraction process, which can handle both flat pixel features and HOG features. It also applies PCA for dimensionality reduction if specified. This function is called from the training code to process the datasets before training the logistic regression model.
 def train_classical_models(X_train, y_train, X_val, y_val, method, multi_label, max_iter):
     Xtr, Xva, _ = extract_features(
         X_train,
@@ -173,6 +184,7 @@ def train_classical_models(X_train, y_train, X_val, y_val, method, multi_label, 
     return results
 
 
+# The train_single function handles the training loop for a single dataset, including data preparation, model training, and evaluation. It returns the predicted probabilities and class labels for the validation set, which can then be used to calculate AUC and accuracy.
 def train_single(data_flag):
     if already_trained(data_flag):
         print(f"  [{data_flag}] Already trained — loading saved results...")
@@ -268,7 +280,7 @@ def train_single(data_flag):
         print(f"  [{data_flag}] ERROR: {e}")
         return (data_flag, None, None, None, None, str(e))
 
-
+# Main entry point for training all datasets sequentially. This loop iterates through all dataset flags, checks if results already exist, and if not, it calls the train_single function to perform the training and evaluation. It also keeps track of results and prints a summary at the end.
 if __name__ == "__main__":
     all_flags = list(INFO.keys())
     total_start = time.time()
@@ -290,6 +302,9 @@ if __name__ == "__main__":
     total_elapsed = time.time() - total_start
     total_min = int(total_elapsed // 60)
     total_sec = int(total_elapsed % 60)
+
+    # this make a sound to tell you that the code is done. (it takes a while to train everything)
+    winsound.Beep(500, 800)
 
     print("\n[3/3] Results")
     print("=" * 64)
