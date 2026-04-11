@@ -6,28 +6,43 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import torchvision.transforms as T
 
 
 # For 2D data, we can use a simple CNN architecture with a few convolutional layers followed by fully connected layers. This should be sufficient for the relatively small and simple images in the medmnist datasets.
 class CNN2D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
+
         self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            # Block 1
+            nn.Conv2d(in_channels, 32, 3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            # Block 2
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+
+            # Block 3
+            nn.Conv2d(64, 128, 3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d((1, 1)),
         )
+
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128 * 7 * 7, 256),
+            nn.Linear(128, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, num_classes),
@@ -41,20 +56,27 @@ class CNN2D(nn.Module):
 class CNN3D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
+
         self.features = nn.Sequential(
-            nn.Conv3d(in_channels, 32, kernel_size=3, padding=1),
+            nn.Conv3d(in_channels, 32, 3, padding=1),
             nn.BatchNorm3d(32),
             nn.ReLU(),
             nn.MaxPool3d(2),
-            nn.Conv3d(32, 64, kernel_size=3, padding=1),
+
+            nn.Conv3d(32, 64, 3, padding=1),
             nn.BatchNorm3d(64),
             nn.ReLU(),
             nn.MaxPool3d(2),
+
+            nn.Conv3d(64, 128, 3, padding=1),
+            nn.BatchNorm3d(128),
+            nn.ReLU(),
             nn.AdaptiveAvgPool3d((1, 1, 1)),
         )
+
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64, 256),
+            nn.Linear(128, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, num_classes),
@@ -65,14 +87,33 @@ class CNN3D(nn.Module):
 
 
 # The train_cnn function will handle the training loop, including data preparation, model training, and evaluation. It will return the predicted probabilities and class labels for the validation set, which can then be used to calculate AUC and accuracy.
-def prepare_tensors_2d(X, y=None, multi_label=False):
-    X = np.asarray(X, dtype=np.float32) / 255.0
-    if X.ndim == 3:
-        X = np.expand_dims(X, axis=1)      # (N, 1, H, W)
-    else:
-        X = X.transpose(0, 3, 1, 2)        # (N, C, H, W)
+def prepare_tensors_2d(X, y=None, multi_label=False, augment=False):
+    X = np.asarray(X)
 
-    X_tensor = torch.from_numpy(X)
+    # Define transforms
+    if augment:
+        transform = T.Compose([
+            T.ToPILImage(),
+            T.RandomHorizontalFlip(),
+            T.RandomRotation(10),
+            T.ToTensor(),
+        ])
+    else:
+        transform = T.Compose([
+            T.ToPILImage(),
+            T.ToTensor(),
+        ])
+
+    # Apply transforms image-by-image
+    X_list = []
+    for img in X:
+        if img.ndim == 2:  # grayscale
+            img = np.expand_dims(img, axis=-1)
+
+        img = transform(img)
+        X_list.append(img)
+
+    X_tensor = torch.stack(X_list)
 
     if y is None:
         return X_tensor
@@ -125,9 +166,9 @@ def train_cnn(
     y_val,
     is_3d_data=False,
     multi_label=False,
-    epochs=20,
+    epochs=30,
     batch_size=64,
-    lr=1e-3,
+    lr=3e-4,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"    CNN training on: {device}")
@@ -160,8 +201,8 @@ def train_cnn(
     else:
         in_channels = 1 if X_train.ndim == 3 else X_train.shape[-1]
         model = CNN2D(in_channels, num_classes).to(device)
-        train_ds = prepare_tensors_2d(X_train, y_train, multi_label=multi_label)
-        val_ds = prepare_tensors_2d(X_val, y_val, multi_label=multi_label)
+        train_ds = prepare_tensors_2d(X_train, y_train, multi_label=multi_label, augment=True)
+        val_ds = prepare_tensors_2d(X_val, y_val, multi_label=multi_label, augment=False)
 
     # We set num_workers=0 here to avoid issues with multiprocessing on Windows. If you are running this code on Linux or macOS, you can set num_workers to a higher value (e.g., 4) to speed up data loading.
     train_loader = DataLoader(
