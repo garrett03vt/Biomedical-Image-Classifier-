@@ -11,24 +11,18 @@ from utils import (
 
 # change data_flag to explore different datasets
 data_flag = "bloodmnist"
-# "adrenalmnist3d"
 # "bloodmnist"
 # "breastmnist"
 # "chestmnist"
 # "dermamnist"
-# "fracturemnist3d"
-# "nodulmnist3d"
 # "octmnist"
 # "organamnist"
 # "organcmnist"
-# "organmnist3d"
 # "organsmnist"
 # "pathmnist"
 # "pneumoniamnist"
 # "retinamnist"
-# "synapsemnist3d"
 # "tissuemnist"
-# "vesselmnist3d"
 
 
 def main():
