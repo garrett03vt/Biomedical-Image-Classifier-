@@ -91,25 +91,42 @@ class CNN2D(nn.Module):
 # which threw away all spatial structure and is why several 3D datasets came
 # back below 0.5 AUC. This version keeps real spatial reasoning all the way
 # through and only pools to 1x1x1 right before the classifier.
+#
+# We use GroupNorm rather than BatchNorm3d because the 3D MedMNIST datasets
+# are small (~1k volumes) and batches are correspondingly small (32). With
+# BatchNorm under aggressive augmentation, the running mean/var stats tracked
+# during training drift wildly, so the model behaves very differently at eval
+# (which uses those stored stats) than during training (which uses per-batch
+# stats). Symptom: train loss drops normally while val loss explodes into the
+# dozens. GroupNorm has no running stats, so train and eval modes behave
+# identically — the failure mode is eliminated by construction.
+
+def _gn(num_channels):
+    # Pick a group count up to 32 that evenly divides num_channels.
+    for g in (32, 16, 8, 4, 2, 1):
+        if num_channels % g == 0 and g <= num_channels:
+            return nn.GroupNorm(g, num_channels)
+    return nn.GroupNorm(1, num_channels)
+
 
 class ResidualBlock3D(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1   = nn.BatchNorm3d(out_channels)
+        self.gn1   = _gn(out_channels)
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2   = nn.BatchNorm3d(out_channels)
+        self.gn2   = _gn(out_channels)
 
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm3d(out_channels),
+                _gn(out_channels),
             )
 
     def forward(self, x):
-        out = torch.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = torch.relu(self.gn1(self.conv1(x)))
+        out = self.gn2(self.conv2(out))
         out += self.shortcut(x)
         return torch.relu(out)
 
@@ -119,17 +136,14 @@ class CNN3D(nn.Module):
         super().__init__()
         self.in_planes = 32
 
-        # Stem: 3x3x3 conv on the 28x28x28 volume (no aggressive downsample yet)
+        # Stem
         self.conv1 = nn.Conv3d(in_channels, 32, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1   = nn.BatchNorm3d(32)
+        self.gn1   = _gn(32)
 
-        # Three residual stages with progressive channel growth and stride-2
-        # downsampling. Width is tighter than the 2D version because 3D conv
-        # cubes the parameter & FLOP cost; this gives a real ResNet without
-        # blowing up memory or epoch time.
-        #   stage 1: 32  ch, 28^3 -> 28^3
-        #   stage 2: 64  ch, 28^3 -> 14^3
-        #   stage 3: 128 ch, 14^3 -> 7^3
+        # Three residual stages: 32 -> 64 -> 128 channels with stride-2
+        # downsampling at stages 2-3. Spatial dims go 28^3 -> 14^3 -> 7^3.
+        # Width is tighter than the 2D version because 3D conv cubes the
+        # parameter & FLOP cost.
         self.layer1 = self._make_layer(32,  2, stride=1)
         self.layer2 = self._make_layer(64,  2, stride=2)
         self.layer3 = self._make_layer(128, 2, stride=2)
@@ -151,7 +165,7 @@ class CNN3D(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = torch.relu(self.bn1(self.conv1(x)))
+        out = torch.relu(self.gn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
@@ -219,18 +233,35 @@ def prepare_tensors_2d(X, y=None, multi_label=False, augment=False, strong_augme
 #   * a TensorDataset (when augment=False) — fast, no random ops at __getitem__
 #   * a MedMNIST3DDataset (when augment=True) — augments per sample per epoch,
 #     so the model sees a different volume every time. The previous code
-#     applied "augmentation" once at dataset construction time, which means
-#     every epoch saw the *same* augmented samples — equivalent to no
-#     augmentation at all from epoch 2 onward.
+#     applied "augmentation" once at dataset construction, which means every
+#     epoch saw the *same* augmented samples — equivalent to no augmentation
+#     at all from epoch 2 onward.
 
 class MedMNIST3DDataset(torch.utils.data.Dataset):
-    """3D dataset with on-the-fly random flips + intensity jitter."""
+    """
+    3D dataset with on-the-fly random flips + light intensity jitter.
 
-    def __init__(self, X, y, multi_label=False):
+    `flip_axes` controls which spatial axes can be randomly flipped. For
+    most datasets all three is fine, but datasets with laterality labels
+    (e.g. organmnist3d's "kidney-left" vs "kidney-right") MUST exclude
+    the left-right axis or the model is being trained with wrong labels.
+
+    Convention after the channel-first transpose in prepare_tensors_3d:
+        axis 1 = depth (axial slice index, head-foot in body coords)
+        axis 2 = height (typically anterior-posterior)
+        axis 3 = width  (typically left-right) ← skip this for laterality
+
+    Default: only axis 1 (depth/axial), which is anatomically safe for
+    every dataset.
+    """
+
+    def __init__(self, X, y, multi_label=False, flip_axes=(1,), noise_std=0.01):
         # X: float32 in [0, 1], shape (N, C, D, H, W)
         self.X = X
         self.y = y
         self.multi_label = multi_label
+        self.flip_axes = flip_axes
+        self.noise_std = noise_std
 
     def __len__(self):
         return self.X.shape[0]
@@ -238,20 +269,18 @@ class MedMNIST3DDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         vol = self.X[idx]  # (C, D, H, W) float32
 
-        # Random flip along each spatial axis independently
-        if np.random.rand() < 0.5:
-            vol = np.flip(vol, axis=1)  # depth
-        if np.random.rand() < 0.5:
-            vol = np.flip(vol, axis=2)  # height
-        if np.random.rand() < 0.5:
-            vol = np.flip(vol, axis=3)  # width
+        # Random flips on the allowed axes only
+        for ax in self.flip_axes:
+            if np.random.rand() < 0.5:
+                vol = np.flip(vol, axis=ax)
 
-        # Light intensity noise — not added on top of the array because we
-        # don't want to mutate the source. Make a fresh copy first to drop the
-        # negative strides from np.flip (PyTorch can't take those).
+        # ascontiguousarray to drop the negative strides from np.flip
+        # (PyTorch can't take negative-strided arrays).
         vol = np.ascontiguousarray(vol)
-        vol = vol + np.random.normal(0, 0.02, vol.shape).astype(np.float32)
-        vol = np.clip(vol, 0.0, 1.0)
+
+        if self.noise_std > 0:
+            vol = vol + np.random.normal(0, self.noise_std, vol.shape).astype(np.float32)
+            vol = np.clip(vol, 0.0, 1.0)
 
         x_tensor = torch.from_numpy(vol)
 
@@ -263,7 +292,7 @@ class MedMNIST3DDataset(torch.utils.data.Dataset):
         return x_tensor, y_tensor
 
 
-def prepare_tensors_3d(X, y=None, multi_label=False, augment=False):
+def prepare_tensors_3d(X, y=None, multi_label=False, augment=False, flip_axes=(1,), noise_std=0.01):
     X = np.asarray(X, dtype=np.float32) / 255.0
 
     if X.ndim == 4:
@@ -279,8 +308,8 @@ def prepare_tensors_3d(X, y=None, multi_label=False, augment=False):
         y = y.reshape(-1)
 
     if augment:
-        # On-the-fly per-sample augmentation
-        return MedMNIST3DDataset(X, y, multi_label=multi_label)
+        return MedMNIST3DDataset(X, y, multi_label=multi_label,
+                                 flip_axes=flip_axes, noise_std=noise_std)
 
     # Validation / no augmentation: a plain TensorDataset is faster
     X_tensor = torch.from_numpy(X)
@@ -353,10 +382,19 @@ def train_cnn(
     strong_augment=False, 
     label_smoothing=0.1,
     tune_threshold=False, 
-    weight_decay=1e-2  # High default to combat overfitting
+    weight_decay=1e-2,  # High default to combat overfitting
+    flip_axes=(1,),     # 3D only: which spatial axes to allow flipping on
+    noise_std=0.01,     # 3D only: stddev of intensity jitter (0 disables it)
+    use_amp=None,       # None = auto (off for 3D, on for 2D); bool to force
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"    CNN training on: {device}")
+
+    # Disable AMP for 3D by default. The 3D models are small (~2M params) so
+    # the fp16 speedup is modest, and AMP + 3D conv + GroupNorm combinations
+    # have been a source of numerical instability.
+    if use_amp is None:
+        use_amp = (not is_3d_data) and (device.type == "cuda")
 
     # DATA PREPARATION 
     y_train = np.asarray(y_train)
@@ -377,7 +415,8 @@ def train_cnn(
         else:
             in_channels = 1
         model = CNN3D(in_channels=in_channels, num_classes=num_classes).to(device)
-        train_ds = prepare_tensors_3d(X_train, y_train, multi_label=multi_label, augment=strong_augment)
+        train_ds = prepare_tensors_3d(X_train, y_train, multi_label=multi_label,
+                                      augment=strong_augment, flip_axes=flip_axes, noise_std=noise_std)
         val_ds = prepare_tensors_3d(X_val, y_val, multi_label=multi_label, augment=False)
     else:
         in_channels = 1 if X_train.ndim == 3 else X_train.shape[-1]
@@ -410,11 +449,11 @@ def train_cnn(
     # freeze the early-stop counter for the first 30% of epochs (the LR
     # warm-up phase) so we never abort during the ramp-up — checkpoints saved
     # during that phase are usually noisy and not representative.
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     stopper = EarlyStopping(patience=12)
     min_epochs = max(int(epochs * 0.3), 5)
     best_model_state = None
-    
+
     train_losses, val_losses = [], []
 
     for epoch in range(epochs):
@@ -425,7 +464,7 @@ def train_cnn(
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad(set_to_none=True)
             
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            with torch.cuda.amp.autocast(enabled=use_amp):
                 out = model(X_batch)
                 loss = criterion(out, y_batch)
             
@@ -448,7 +487,7 @@ def train_cnn(
         with torch.inference_mode():
             for X_batch, y_batch in val_loader:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-                with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                with torch.cuda.amp.autocast(enabled=use_amp):
                     out = model(X_batch)
                     v_loss = criterion(out, y_batch)
                 total_val_loss += v_loss.item()
@@ -470,7 +509,7 @@ def train_cnn(
             break
 
     # FINAL EVAL
-    # Load the best weights (not the last ones) to ensure didn't return an overfitted model
+    # Load the best weights (not the last ones) to ensure we didn't return an overfitted model
     model.load_state_dict(best_model_state)
     model.to(device)
     model.eval()

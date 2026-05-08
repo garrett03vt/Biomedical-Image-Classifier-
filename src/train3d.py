@@ -26,31 +26,45 @@ torch.set_float32_matmul_precision("high")
 MODELS_DIR = "models_3d"
 
 # Per-dataset notes:
-#   * All 3D datasets are small (1k–10k volumes), so they need real augmentation.
-#     The previous "augment once at dataset construction" was a no-op — fixed
-#     in cnn.py to augment per-sample per-epoch.
-#   * vessel/adrenal/nodule are imbalanced binaries (vessel especially:
-#     ~12% positive), so they get use_class_weights=True.
-#   * fracture (3-class, ~1k volumes) was the only one previously configured;
-#     keep that direction but with the new architecture it needs fewer epochs.
-#   * organ (11-class, 972 train) gets the most aggressive treatment:
-#     hardest task, smallest dataset.
-#   * lr=1e-3 + OneCycleLR works well with the new BatchNorm-heavy 3D ResNet
-#     across all datasets; the previous 3e-4 was too conservative for the
-#     short epoch budget.
+#   * 3D MedMNIST datasets are small (~1k volumes each) and need real
+#     augmentation. The MedMNIST3DDataset (in cnn.py) augments per-sample
+#     per-epoch — the previous "augment the whole array once" was a no-op
+#     after epoch 1.
+#   * organmnist3d has laterality labels ("kidney-left" vs "kidney-right"
+#     etc.). flip_axes=(1,) restricts random flips to the depth axis only,
+#     because a left-right or front-back flip would silently relabel the
+#     volume — the model would be trained on lies. All other 3D datasets
+#     can flip on all three spatial axes safely.
+#   * Convention after channel-first transpose:
+#       axis 1 = depth (axial / head-foot)
+#       axis 2 = height (anterior-posterior)
+#       axis 3 = width  (left-right)        ← skip for organmnist3d
+#   * use_class_weights for the imbalanced binary tasks
+#     (vessel ~12% positive, adrenal ~25%, nodule ~25%).
+#   * lr=5e-4 across the board — 1e-3 was too aggressive on these tiny
+#     datasets; the high-LR phase of OneCycleLR was destabilising training.
+#   * GroupNorm + AMP off (handled inside cnn.py) — fixes the
+#     train/eval BatchNorm stats mismatch that was driving val loss to 28+
+#     while train loss looked normal.
 DATASETS_3D = {
-    "adrenalmnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
-                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
-    "fracturemnist3d": {"task": "multi-class",  "n_classes": 3,  "batch": 32, "epochs": 100, "lr": 1e-3,
-                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3, "label_smoothing": 0.1},
-    "nodulemnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
-                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
-    "organmnist3d":    {"task": "multi-class",  "n_classes": 11, "batch": 32, "epochs": 80,  "lr": 1e-3,
-                        "strong_augment": True, "weight_decay": 1e-3, "label_smoothing": 0.1},
-    "synapsemnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
-                        "strong_augment": True, "weight_decay": 1e-3},
-    "vesselmnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
-                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
+    "adrenalmnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 120, "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3,
+                        "flip_axes": (1, 2, 3)},
+    "fracturemnist3d": {"task": "multi-class",  "n_classes": 3,  "batch": 32, "epochs": 200, "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3,
+                        "flip_axes": (1, 2, 3)},
+    "nodulemnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 100, "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3,
+                        "flip_axes": (1, 2, 3)},
+    "organmnist3d":    {"task": "multi-class",  "n_classes": 11, "batch": 32, "epochs": 120, "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3, "label_smoothing": 0.1,
+                        "flip_axes": (1,)},
+    "synapsemnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 120, "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3,
+                        "flip_axes": (1, 2, 3)},
+    "vesselmnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 120, "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3,
+                        "flip_axes": (1, 2, 3)},
 }
 
 DEFAULT_LR = 3e-4
@@ -176,6 +190,7 @@ def train_single_3d(
         strong_augment=meta.get("strong_augment", False),
         label_smoothing=meta.get("label_smoothing", 0.0),
         weight_decay=meta.get("weight_decay", 1e-2),
+        flip_axes=meta.get("flip_axes", (1, 2, 3)),
     )
 
     elapsed  = time.time() - start_time
@@ -219,7 +234,7 @@ def train_single_3d(
     }
 
 
-def train_all_3d(lr=DEFAULT_LR, force_retrain=False):
+def train_all_3d(lr=None, force_retrain=False):
     print("=" * 64)
     print("  3D Biomedical Image Classification Pipeline")
     print("  RTX 4090 | CNN only | per-dataset tuning")
@@ -275,4 +290,4 @@ def train_all_3d(lr=DEFAULT_LR, force_retrain=False):
 
 
 if __name__ == "__main__":
-    train_all_3d(lr=3e-4, force_retrain=False)
+    train_all_3d(force_retrain=False)
