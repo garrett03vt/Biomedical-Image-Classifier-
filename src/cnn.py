@@ -150,10 +150,17 @@ class CNN3D(nn.Module):
 
         # Only collapse to a single voxel right before the classifier
         self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        # Widened classifier with a hidden FC layer. The previous head was
+        # 128 -> num_classes with Dropout(0.5), which together with strong
+        # augmentation + weight_decay 1e-3 was over-regularising tiny (~1k
+        # volume) datasets and preventing the model from fitting at all.
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.5),
-            nn.Linear(128, num_classes),
+            nn.Dropout(0.3),
+            nn.Linear(128, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes),
         )
 
     def _make_layer(self, planes, num_blocks, stride):
@@ -255,7 +262,7 @@ class MedMNIST3DDataset(torch.utils.data.Dataset):
     every dataset.
     """
 
-    def __init__(self, X, y, multi_label=False, flip_axes=(1,), noise_std=0.01):
+    def __init__(self, X, y, multi_label=False, flip_axes=(1,), noise_std=0.0):
         # X: float32 in [0, 1], shape (N, C, D, H, W)
         self.X = X
         self.y = y
@@ -292,7 +299,7 @@ class MedMNIST3DDataset(torch.utils.data.Dataset):
         return x_tensor, y_tensor
 
 
-def prepare_tensors_3d(X, y=None, multi_label=False, augment=False, flip_axes=(1,), noise_std=0.01):
+def prepare_tensors_3d(X, y=None, multi_label=False, augment=False, flip_axes=(1,), noise_std=0.0):
     X = np.asarray(X, dtype=np.float32) / 255.0
 
     if X.ndim == 4:
@@ -384,7 +391,7 @@ def train_cnn(
     tune_threshold=False, 
     weight_decay=1e-2,  # High default to combat overfitting
     flip_axes=(1,),     # 3D only: which spatial axes to allow flipping on
-    noise_std=0.01,     # 3D only: stddev of intensity jitter (0 disables it)
+    noise_std=0.0,      # 3D only: stddev of intensity jitter (0 disables it)
     use_amp=None,       # None = auto (off for 3D, on for 2D); bool to force
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -438,10 +445,22 @@ def train_cnn(
         criterion = nn.CrossEntropyLoss(weight=cw, label_smoothing=label_smoothing)
 
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=epochs, pct_start=0.3
-    )
+
+    # OneCycleLR works well for 2D where there are many batches per epoch and
+    # the dataset is large enough to absorb the high-LR phase. For 3D the
+    # datasets are ~1k volumes (~30 batches/epoch), and the high-LR ramp was
+    # destabilising training — switch to plain cosine decay from `lr` down to
+    # `lr/100`. CosineAnnealingLR steps once per epoch (not per batch).
+    if is_3d_data:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs, eta_min=lr * 0.01
+        )
+        scheduler_step_per_batch = False
+    else:
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=lr, steps_per_epoch=len(train_loader), epochs=epochs, pct_start=0.3
+        )
+        scheduler_step_per_batch = True
 
     # TRAINING LOOP WITH EARLY STOPPING
     # Patience widened from 5 to 12 because OneCycleLR can produce big val-loss
@@ -476,7 +495,8 @@ def train_cnn(
             
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step() # Update LR every batch
+            if scheduler_step_per_batch:
+                scheduler.step() # OneCycleLR: update LR every batch
             total_train_loss += loss.item()
 
         avg_train = total_train_loss / len(train_loader)
@@ -495,6 +515,10 @@ def train_cnn(
         avg_val = total_val_loss / len(val_loader)
         train_losses.append(avg_train)
         val_losses.append(avg_val)
+
+        # Cosine scheduler steps once per epoch (after the val pass)
+        if not scheduler_step_per_batch:
+            scheduler.step()
 
         print(f"    Epoch {epoch+1}/{epochs} | Train Loss: {avg_train:.4f} | Val Loss: {avg_val:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
 

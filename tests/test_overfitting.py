@@ -24,7 +24,20 @@ OUTPUT_DIR     = "overfit_plots"
 
 # Thresholds for flagging
 OVERFIT_GAP    = 0.15   # val_loss - train_loss > this at the final epoch → overfit
-UNDERFIT_FLOOR = 0.5    # both losses remain above this at the final epoch → underfit
+
+# Underfit floor depends on the loss structure of the task. With label
+# smoothing of α on a K-class CE loss, even a perfect classifier has
+# train loss ≈ -((1-α)·log(1-α + α/K) + (K-1)·(α/K)·log(α/K)). For
+# common configs this floor can be substantial:
+#   * 11-class with α=0.1 → floor ≈ 0.36
+#   * 3-class  with α=0.1 → floor ≈ 0.43
+#   * 2-class  with α=0.1 → floor ≈ 0.33
+# Without per-model smoothing info we can't compute the exact floor, so
+# we use a conservative absolute threshold that doesn't false-positive on
+# smoothed multi-class losses. If a final-epoch val loss is well above
+# this floor *and* far from the train loss, it's actually underfit.
+UNDERFIT_FLOOR_TRAIN = 0.7   # train loss must exceed this to flag underfit
+UNDERFIT_FLOOR_VAL   = 0.7   # val loss must also exceed this
 
 
 def load_all_results(models_dir, suffix):
@@ -62,7 +75,11 @@ def diagnose(train_losses, val_losses):
     final_val   = val_losses[-1]
     gap         = final_val - final_train
 
-    if final_train > UNDERFIT_FLOOR and final_val > UNDERFIT_FLOOR:
+    # Underfitting requires both losses to be high in absolute terms.
+    # A model with label smoothing on a multi-class task can have train
+    # loss of 0.6+ while being a near-perfect classifier (AUC > 0.99),
+    # so we use a higher floor than v1 and require it on both sides.
+    if final_train > UNDERFIT_FLOOR_TRAIN and final_val > UNDERFIT_FLOOR_VAL:
         return "UNDERFITTING"
     if gap > OVERFIT_GAP:
         return "OVERFITTING"
@@ -211,7 +228,9 @@ def print_text_summary(all_results):
     print("=" * 72)
     print(f"\n  Thresholds used:")
     print(f"    OVERFITTING  : final val_loss - train_loss > {OVERFIT_GAP}")
-    print(f"    UNDERFITTING : both final losses > {UNDERFIT_FLOOR}")
+    print(f"    UNDERFITTING : final train_loss > {UNDERFIT_FLOOR_TRAIN} AND final val_loss > {UNDERFIT_FLOOR_VAL}")
+    print(f"  Note: label smoothing raises the CE loss floor, so a model with")
+    print(f"        train loss 0.4-0.7 may still be a near-perfect classifier.")
 
 
 def main():

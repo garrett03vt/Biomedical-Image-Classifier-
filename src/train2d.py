@@ -61,7 +61,7 @@ DATASETS_2D = {
                         "lr": 5e-5, "weight_decay": 1e-2}, # Heavy decay for tiny dataset,
     "bloodmnist":     {"task": "multi-class",  "n_classes": 8,  "n_train": 11959,  "batch": 256, "epochs": 50},
     "tissuemnist":    {"task": "multi-class",  "n_classes": 8,  "n_train": 165466, "batch": 256, "epochs": 100,
-                       "lr": 1e-3, "weight_decay": 1e-4, "strong_augment": True},
+                       "lr": 1e-3, "weight_decay": 1e-4},
     "organamnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 34561,  "batch": 256, "epochs": 40},
     "organcmnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 12975,  "batch": 256, "epochs": 50},
     "organsmnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 13932,  "batch": 256, "epochs": 35,
