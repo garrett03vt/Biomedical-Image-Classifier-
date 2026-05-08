@@ -1,5 +1,4 @@
-# cnn.py - CNN model definitions and training function for 2D and 3D biomedical image classification.
-# This is where we define the CNN architectures for both 2D and 3D data, as well as the training loop. The train_cnn function will be called from the main training code to train the CNN on each dataset and evaluate its performance.
+# cnn.py - CNN model definitions and training function for 2D and 3D classification.
 
 import numpy as np
 import torch
@@ -9,11 +8,9 @@ from torch.utils.data import DataLoader, TensorDataset
 import torchvision.transforms as T
 
 
-# For 2D data, we can use a simple CNN architecture with a few convolutional layers followed by fully connected layers. This should be sufficient for the relatively small and simple images in the medmnist datasets.
 class CNN2D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
-
         self.features = nn.Sequential(
             # Block 1
             nn.Conv2d(in_channels, 32, 3, padding=1),
@@ -23,7 +20,6 @@ class CNN2D(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
-
             # Block 2
             nn.Conv2d(32, 64, 3, padding=1),
             nn.BatchNorm2d(64),
@@ -32,14 +28,12 @@ class CNN2D(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
-
             # Block 3
             nn.Conv2d(64, 128, 3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
-
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(128, 256),
@@ -52,11 +46,9 @@ class CNN2D(nn.Module):
         return self.classifier(self.features(x))
 
 
-# For 3D data, we can use a similar architecture but with 3D convolutional layers. This will allow us to capture spatial features across the depth dimension of the volumes.
 class CNN3D(nn.Module):
     def __init__(self, in_channels, num_classes):
         super().__init__()
-
         self.features = nn.Sequential(
             nn.Conv3d(in_channels, 32, 3, padding=1),
             nn.BatchNorm3d(32),
@@ -73,7 +65,6 @@ class CNN3D(nn.Module):
             nn.ReLU(),
             nn.AdaptiveAvgPool3d((1, 1, 1)),
         )
-
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(128, 256),
@@ -86,12 +77,20 @@ class CNN3D(nn.Module):
         return self.classifier(self.features(x))
 
 
-# The train_cnn function will handle the training loop, including data preparation, model training, and evaluation. It will return the predicted probabilities and class labels for the validation set, which can then be used to calculate AUC and accuracy.
-def prepare_tensors_2d(X, y=None, multi_label=False, augment=False):
+def prepare_tensors_2d(X, y=None, multi_label=False, augment=False, strong_augment=False):
     X = np.asarray(X)
 
-    # Define transforms
-    if augment:
+    if strong_augment:
+        # Stronger augmentation for small / imbalanced datasets (retinamnist, fracturemnist3d)
+        transform = T.Compose([
+            T.ToPILImage(),
+            T.RandomHorizontalFlip(),
+            T.RandomVerticalFlip(),
+            T.RandomRotation(20),
+            T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+            T.ToTensor(),
+        ])
+    elif augment:
         transform = T.Compose([
             T.ToPILImage(),
             T.RandomHorizontalFlip(),
@@ -104,14 +103,11 @@ def prepare_tensors_2d(X, y=None, multi_label=False, augment=False):
             T.ToTensor(),
         ])
 
-    # Apply transforms image-by-image
     X_list = []
     for img in X:
-        if img.ndim == 2:  # grayscale
+        if img.ndim == 2:
             img = np.expand_dims(img, axis=-1)
-
-        img = transform(img)
-        X_list.append(img)
+        X_list.append(transform(img))
 
     X_tensor = torch.stack(X_list)
 
@@ -130,16 +126,18 @@ def prepare_tensors_2d(X, y=None, multi_label=False, augment=False):
     return TensorDataset(X_tensor, y_tensor)
 
 
-# For 3D data, we need to ensure the input shape is correct for 3D convolutions. We also need to handle the labels similarly to the 2D case.
-def prepare_tensors_3d(X, y=None, multi_label=False):
+def prepare_tensors_3d(X, y=None, multi_label=False, augment=False):
     X = np.asarray(X, dtype=np.float32) / 255.0
-    
+
     if X.ndim == 4:
-        X = np.expand_dims(X, axis=1)      # (N, 1, D, H, W)
+        X = np.expand_dims(X, axis=1)
     elif X.ndim == 5 and X.shape[-1] in (1, 3):
-        # Only transpose if channels are explicitly at the end (N, D, H, W, C)
-        X = X.transpose(0, 4, 1, 2, 3)     # (N, C, D, H, W)
-    # If ndim == 5 and shape is (N, 1, 28, 28, 28), it's already in (N, C, D, H, W) format.
+        X = X.transpose(0, 4, 1, 2, 3)
+
+    if augment:
+        # Random horizontal flip along W axis for 3D volumes
+        flip_mask = np.random.rand(X.shape[0]) > 0.5
+        X[flip_mask] = X[flip_mask, :, :, :, ::-1].copy()
 
     X_tensor = torch.from_numpy(X)
 
@@ -158,7 +156,31 @@ def prepare_tensors_3d(X, y=None, multi_label=False):
     return TensorDataset(X_tensor, y_tensor)
 
 
-# The main training function for the CNN. This will be called from the main training code to train the CNN on each dataset and evaluate its performance. It returns the predicted probabilities and class labels for the validation set.
+def compute_pos_weight(y_train):
+    """
+    Compute per-label positive weights for BCEWithLogitsLoss to handle class imbalance.
+    pos_weight[i] = (# negative samples) / (# positive samples) for label i.
+    Used for chestmnist multi-label training.
+    """
+    y = np.asarray(y_train, dtype=np.float32)
+    pos = y.sum(axis=0).clip(min=1)
+    neg = (y.shape[0] - y.sum(axis=0)).clip(min=1)
+    return torch.from_numpy(neg / pos).float()
+
+
+def compute_class_weights(y_train, num_classes):
+    """
+    Inverse-frequency class weights for CrossEntropyLoss.
+    Used for fracturemnist3d (imbalanced 3-class) and retinamnist (small ordinal dataset).
+    """
+    y = np.asarray(y_train).reshape(-1)
+    counts = np.bincount(y, minlength=num_classes).astype(np.float32)
+    counts = counts.clip(min=1)
+    weights = 1.0 / counts
+    weights = weights / weights.sum() * num_classes  # normalise so mean weight = 1
+    return torch.from_numpy(weights).float()
+
+
 def train_cnn(
     X_train,
     y_train,
@@ -169,6 +191,11 @@ def train_cnn(
     epochs=30,
     batch_size=64,
     lr=3e-4,
+    # Special flags for problem datasets
+    use_pos_weight=False,       # chestmnist: weighted BCE for label imbalance
+    use_class_weights=False,    # fracturemnist3d / retinamnist: weighted CE
+    strong_augment=False,       # retinamnist / fracturemnist3d: heavier augmentation
+    label_smoothing=0.0,        # retinamnist: smooths ordinal targets slightly
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"    CNN training on: {device}")
@@ -177,11 +204,10 @@ def train_cnn(
         torch.backends.cudnn.benchmark = True
 
     y_train = np.asarray(y_train)
-    y_val = np.asarray(y_val)
+    y_val   = np.asarray(y_val)
 
     num_classes = y_train.shape[1] if multi_label else int(np.max(y_train)) + 1
 
-    # Infer the number of input channels for the CNN based on the shape of X_train. This is important for both 2D and 3D data, as the channel dimension can be in different positions depending on the dataset.
     if is_3d_data:
         if X_train.ndim == 4:
             in_channels = 1
@@ -195,37 +221,50 @@ def train_cnn(
         else:
             raise ValueError(f"Unsupported 3D input shape: {X_train.shape}")
 
-        model = CNN3D(in_channels, num_classes).to(device)
-        train_ds = prepare_tensors_3d(X_train, y_train, multi_label=multi_label)
-        val_ds = prepare_tensors_3d(X_val, y_val, multi_label=multi_label)
+        model    = CNN3D(in_channels, num_classes).to(device)
+        train_ds = prepare_tensors_3d(X_train, y_train, multi_label=multi_label, augment=strong_augment)
+        val_ds   = prepare_tensors_3d(X_val,   y_val,   multi_label=multi_label, augment=False)
     else:
         in_channels = 1 if X_train.ndim == 3 else X_train.shape[-1]
-        model = CNN2D(in_channels, num_classes).to(device)
-        train_ds = prepare_tensors_2d(X_train, y_train, multi_label=multi_label, augment=True)
-        val_ds = prepare_tensors_2d(X_val, y_val, multi_label=multi_label, augment=False)
+        model    = CNN2D(in_channels, num_classes).to(device)
+        train_ds = prepare_tensors_2d(X_train, y_train, multi_label=multi_label,
+                                      augment=not strong_augment, strong_augment=strong_augment)
+        val_ds   = prepare_tensors_2d(X_val,   y_val,   multi_label=multi_label,
+                                      augment=False, strong_augment=False)
 
-    # We set num_workers=0 here to avoid issues with multiprocessing on Windows. If you are running this code on Linux or macOS, you can set num_workers to a higher value (e.g., 4) to speed up data loading.
     train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=(device.type == "cuda"),
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=0, pin_memory=(device.type == "cuda"),
     )
     val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=(device.type == "cuda"),
+        val_ds, batch_size=batch_size, shuffle=False,
+        num_workers=0, pin_memory=(device.type == "cuda"),
     )
 
-    criterion = nn.BCEWithLogitsLoss() if multi_label else nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    # Loss function selection
+    if multi_label:
+        if use_pos_weight:
+            pw = compute_pos_weight(y_train).to(device)
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
+            print(f"    Using weighted BCEWithLogitsLoss (pos_weight range: {pw.min():.2f}–{pw.max():.2f})")
+        else:
+            criterion = nn.BCEWithLogitsLoss()
+    else:
+        if use_class_weights:
+            cw = compute_class_weights(y_train, num_classes).to(device)
+            criterion = nn.CrossEntropyLoss(weight=cw, label_smoothing=label_smoothing)
+            print(f"    Using weighted CrossEntropyLoss (weights: {cw.cpu().numpy().round(3)})")
+        elif label_smoothing > 0:
+            criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+            print(f"    Using CrossEntropyLoss with label_smoothing={label_smoothing}")
+        else:
+            criterion = nn.CrossEntropyLoss()
 
-    # Training loop
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # CosineAnnealingLR gives better final performance than StepLR for small/imbalanced sets
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr * 0.01)
+    scaler    = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -237,7 +276,7 @@ def train_cnn(
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-                out = model(X_batch)
+                out  = model(X_batch)
                 loss = criterion(out, y_batch)
 
             scaler.scale(loss).backward()
@@ -251,14 +290,12 @@ def train_cnn(
         print(f"    Epoch {epoch + 1}/{epochs} — loss: {avg_loss:.4f}")
 
     model.eval()
-    all_probs = []
-    all_preds = []
+    all_probs, all_preds = [], []
 
-    # We use torch.inference_mode() here to disable gradient tracking and reduce memory usage during evaluation. This is important for larger models and datasets, especially when running on a GPU.
     with torch.inference_mode():
         for X_batch, _ in val_loader:
             X_batch = X_batch.to(device, non_blocking=True)
-            out = model(X_batch)
+            out     = model(X_batch)
 
             if multi_label:
                 probs = torch.sigmoid(out).cpu().numpy()
