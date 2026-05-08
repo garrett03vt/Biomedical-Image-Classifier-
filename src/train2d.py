@@ -1,6 +1,6 @@
 # train2d.py
 # Train CNN2D models on all 12 2D MedMNIST datasets.
-# Optimized for: RTX 4090 (24 GB VRAM) | Ryzen 9 5900X (12C/24T) | 128 GB RAM. change batch sizes and epochs in DATASETS_2D if you have different hardware.
+# Optimized for: RTX 4090 (24 GB VRAM) | Ryzen 9 5900X (12C/24T) | 128 GB RAM
 #
 # Results saved to models_2d/
 
@@ -27,27 +27,35 @@ torch.set_float32_matmul_precision("high")
 
 MODELS_DIR = "models_2d"
 
-# Per-dataset config.
-# Extra keys:
-#   use_pos_weight   — weighted BCE for multi-label imbalance (chestmnist)
-#   use_class_weights — weighted CE for class imbalance (retinamnist)
-#   strong_augment   — heavier augmentation for small datasets (retinamnist)
-#   label_smoothing  — soft targets for ordinal regression (retinamnist)
+# chestmnist fixes:
+#   use_pos_weight=True   — capped inverse-frequency BCE weights (max 10×)
+#   tune_threshold=True   — per-label F1-optimal threshold replaces fixed 0.5
+#   lr=1e-4               — lower LR stabilises multi-label weighted BCE
+#   epochs=80             — more passes needed for 14-label learning
+#
+# retinamnist fixes:
+#   use_class_weights=True — inverse-frequency CE weights for 5 ordinal classes
+#   strong_augment=True    — flips + rotation + colour jitter
+#   label_smoothing=0.1    — prevents overconfident predictions between adjacent grades
+#   epochs=200             — tiny dataset needs many passes
 DATASETS_2D = {
     "pathmnist":      {"task": "multi-class",  "n_classes": 9,  "n_train": 89996,  "batch": 512, "epochs": 30},
-    "chestmnist":     {"task": "multi-label",  "n_classes": 14, "n_train": 78468,  "batch": 256, "epochs": 50,
-                       "use_pos_weight": True},
-    "dermamnist":     {"task": "multi-class",  "n_classes": 7,  "n_train": 7007,   "batch": 256, "epochs": 50},
-    "octmnist":       {"task": "multi-class",  "n_classes": 4,  "n_train": 97477,  "batch": 512, "epochs": 30},
+    "chestmnist":     {"task": "multi-label",  "n_classes": 14, "n_train": 78468,  "batch": 256, "epochs": 80,
+                       "use_pos_weight": True, "tune_threshold": True, "lr": 1e-4, "strong_augment": True},
+    "dermamnist":     {"task": "multi-class",  "n_classes": 7,  "n_train": 7007,   "batch": 256, "epochs": 30,
+                       "strong_augment": True},
+    "octmnist":       {"task": "multi-class",  "n_classes": 4,  "n_train": 97477,  "batch": 512, "epochs": 20},
     "pneumoniamnist": {"task": "binary-class", "n_classes": 2,  "n_train": 4708,   "batch": 128, "epochs": 50},
-    "retinamnist":    {"task": "ordinal-reg",  "n_classes": 5,  "n_train": 1080,   "batch": 32,  "epochs": 150,
+    "retinamnist":    {"task": "ordinal-reg",  "n_classes": 5,  "n_train": 1080,   "batch": 32,  "epochs": 200,
                        "use_class_weights": True, "strong_augment": True, "label_smoothing": 0.1},
-    "breastmnist":    {"task": "binary-class", "n_classes": 2,  "n_train": 546,    "batch": 32,  "epochs": 100},
+    "breastmnist":    {"task": "binary-class", "n_classes": 2,  "n_train": 546,    "batch": 32,  "epochs": 150,
+                       "lr": 5e-5},
     "bloodmnist":     {"task": "multi-class",  "n_classes": 8,  "n_train": 11959,  "batch": 256, "epochs": 50},
-    "tissuemnist":    {"task": "multi-class",  "n_classes": 8,  "n_train": 165466, "batch": 512, "epochs": 25},
+    "tissuemnist":    {"task": "multi-class",  "n_classes": 8,  "n_train": 165466, "batch": 512, "epochs": 50},
     "organamnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 34561,  "batch": 256, "epochs": 40},
     "organcmnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 12975,  "batch": 256, "epochs": 50},
-    "organsmnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 13932,  "batch": 256, "epochs": 50},
+    "organsmnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 13932,  "batch": 256, "epochs": 35,
+                       "strong_augment": True},
 }
 
 DEFAULT_LR = 3e-4
@@ -84,7 +92,7 @@ def already_trained(data_flag):
     return os.path.exists(_path(data_flag))
 
 
-def save_2d_results(data_flag, auc, acc, duration, labels, report_str):
+def save_2d_results(data_flag, auc, acc, duration, labels, report_str, train_losses, val_losses):
     os.makedirs(MODELS_DIR, exist_ok=True)
     joblib.dump(
         {
@@ -95,6 +103,8 @@ def save_2d_results(data_flag, auc, acc, duration, labels, report_str):
             "duration":     duration,
             "labels":       labels,
             "class_report": report_str,
+            "train_losses": train_losses,
+            "val_losses":   val_losses,
         },
         _path(data_flag),
     )
@@ -108,7 +118,7 @@ def train_single_2d(
     data_flag,
     epochs=None,
     batch_size=None,
-    lr=DEFAULT_LR,
+    lr=None,
     force_retrain=False,
 ):
     if data_flag not in DATASETS_2D:
@@ -117,6 +127,7 @@ def train_single_2d(
     meta       = DATASETS_2D[data_flag]
     batch_size = batch_size if batch_size is not None else meta["batch"]
     epochs     = epochs     if epochs     is not None else meta["epochs"]
+    lr         = lr         if lr         is not None else meta.get("lr", DEFAULT_LR)
 
     if not force_retrain and already_trained(data_flag):
         tqdm.write(f"  [{data_flag}] Already trained — loading saved result...")
@@ -148,14 +159,13 @@ def train_single_2d(
     multi_label = is_multi_label_target(y_train)
 
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    tqdm.write(f"\n  X_train     : {X_train.shape}  y_train : {y_train.shape}")
-    tqdm.write(f"  X_val       : {X_val.shape}    y_val   : {y_val.shape}")
-    tqdm.write(f"  Multi-label : {multi_label}")
-    tqdm.write(f"  Device      : {device_name}\n")
+    tqdm.write(f"\n  X_train : {X_train.shape}  y_train : {y_train.shape}")
+    tqdm.write(f"  X_val   : {X_val.shape}    y_val   : {y_val.shape}")
+    tqdm.write(f"  Device  : {device_name}\n")
 
     start_time = time.time()
 
-    y_probs, y_preds = train_cnn(
+    y_probs, y_preds, train_losses, val_losses = train_cnn(
         X_train, y_train,
         X_val,   y_val,
         is_3d_data=False,
@@ -167,6 +177,7 @@ def train_single_2d(
         use_class_weights=meta.get("use_class_weights", False),
         strong_augment=meta.get("strong_augment", False),
         label_smoothing=meta.get("label_smoothing", 0.0),
+        tune_threshold=meta.get("tune_threshold", False),
     )
 
     elapsed  = time.time() - start_time
@@ -196,7 +207,7 @@ def train_single_2d(
             class_acc = accuracy_score(y_val[mask], y_preds[mask])
             tqdm.write(f"    [{class_id}] {class_name:<26}: {class_acc:.4f}  (n={mask.sum()})")
 
-    save_2d_results(data_flag, auc, acc, duration, labels, report_str)
+    save_2d_results(data_flag, auc, acc, duration, labels, report_str, train_losses, val_losses)
 
     return {
         "dataset":      data_flag,
@@ -206,10 +217,12 @@ def train_single_2d(
         "duration":     duration,
         "labels":       labels,
         "class_report": report_str,
+        "train_losses": train_losses,
+        "val_losses":   val_losses,
     }
 
 
-def train_all_2d(lr=DEFAULT_LR, force_retrain=False):
+def train_all_2d(force_retrain=False):
     print("=" * 72)
     print("  2D Biomedical Image Classification Pipeline")
     print("  RTX 4090 | CNN only | per-dataset batch & epoch tuning")
@@ -232,19 +245,19 @@ def train_all_2d(lr=DEFAULT_LR, force_retrain=False):
 
     for flag in tqdm(DATASETS_2D, desc="2D training", unit="dataset"):
         try:
-            result = train_single_2d(flag, lr=lr, force_retrain=force_retrain)
+            result = train_single_2d(flag, force_retrain=force_retrain)
             all_results.append(result)
         except Exception as e:
             tqdm.write(f"\n  [{flag}] ERROR: {e}")
             all_results.append({
                 "dataset": flag, "auc": None, "accuracy": None,
-                "method": "cnn2d", "duration": "—", "labels": {}, "class_report": str(e),
+                "method": "cnn2d", "duration": "—", "labels": {},
+                "class_report": str(e), "train_losses": [], "val_losses": [],
             })
 
     total_elapsed  = time.time() - total_start
     total_duration = f"{int(total_elapsed // 60)}m {int(total_elapsed % 60)}s"
 
-    # Flush before printing summary so tqdm bar doesn't eat the first lines (BUG FIX)
     sys.stdout.flush()
     print("\n" + "=" * 72)
     print("  2D Training Summary")
@@ -269,4 +282,4 @@ def train_all_2d(lr=DEFAULT_LR, force_retrain=False):
 
 
 if __name__ == "__main__":
-    train_all_2d(lr=3e-4, force_retrain=False)
+    train_all_2d(force_retrain=False)

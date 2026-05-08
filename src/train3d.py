@@ -1,6 +1,6 @@
 # train3d.py
 # Train CNN3D models on all 6 3D MedMNIST datasets.
-# Optimized for: RTX 4090 (24 GB VRAM) | Ryzen 9 5900X (12C/24T) | 128 GB RAM. CHANGE BATCH SIZES AND EPOCHS IN DATASETS_3D if you have different hardware.
+# Optimized for: RTX 4090 (24 GB VRAM) | Ryzen 9 5900X (12C/24T) | 128 GB RAM
 #
 # Results saved to models_3d/
 
@@ -25,11 +25,13 @@ torch.set_float32_matmul_precision("high")
 
 MODELS_DIR = "models_3d"
 
-# fracturemnist3d: imbalanced 3-class, only 1027 train samples.
-# use_class_weights + strong_augment + 100 epochs to compensate.
+# fracturemnist3d fixes:
+#   use_class_weights=True — inverse-frequency CE weights for 3 imbalanced classes
+#   strong_augment=True    — 3D flips along all axes + intensity jitter
+#   epochs=150             — small dataset needs more passes
 DATASETS_3D = {
     "adrenalmnist3d":  {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
-    "fracturemnist3d": {"task": "multi-class",   "n_classes": 3,  "batch": 16, "epochs": 100,
+    "fracturemnist3d": {"task": "multi-class",   "n_classes": 3,  "batch": 16, "epochs": 150,
                         "use_class_weights": True, "strong_augment": True},
     "nodulemnist3d":   {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
     "organmnist3d":    {"task": "multi-class",   "n_classes": 11, "batch": 32, "epochs": 50},
@@ -71,7 +73,7 @@ def already_trained(data_flag):
     return os.path.exists(_path(data_flag))
 
 
-def save_3d_results(data_flag, auc, acc, duration, labels, report_str):
+def save_3d_results(data_flag, auc, acc, duration, labels, report_str, train_losses, val_losses):
     os.makedirs(MODELS_DIR, exist_ok=True)
     joblib.dump(
         {
@@ -82,6 +84,8 @@ def save_3d_results(data_flag, auc, acc, duration, labels, report_str):
             "duration":     duration,
             "labels":       labels,
             "class_report": report_str,
+            "train_losses": train_losses,
+            "val_losses":   val_losses,
         },
         _path(data_flag),
     )
@@ -138,15 +142,14 @@ def train_single_3d(
     multi_label = is_multi_label_target(y_train)
 
     device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-    tqdm.write(f"\n  X_train     : {X_train.shape}  y_train : {y_train.shape}")
-    tqdm.write(f"  X_val       : {X_val.shape}    y_val   : {y_val.shape}")
-    tqdm.write(f"  Multi-label : {multi_label}")
-    tqdm.write(f"  Device      : {device_name}")
-    tqdm.write(f"  Config      : epochs={epochs}  batch={batch_size}  lr={lr}\n")
+    tqdm.write(f"\n  X_train : {X_train.shape}  y_train : {y_train.shape}")
+    tqdm.write(f"  X_val   : {X_val.shape}    y_val   : {y_val.shape}")
+    tqdm.write(f"  Device  : {device_name}")
+    tqdm.write(f"  Config  : epochs={epochs}  batch={batch_size}  lr={lr}\n")
 
     start_time = time.time()
 
-    y_probs, y_preds = train_cnn(
+    y_probs, y_preds, train_losses, val_losses = train_cnn(
         X_train, y_train,
         X_val,   y_val,
         is_3d_data=True,
@@ -185,7 +188,7 @@ def train_single_3d(
         class_acc = accuracy_score(y_val[mask], y_preds[mask])
         tqdm.write(f"    [{class_id}] {class_name:<24}: {class_acc:.4f}  (n={mask.sum()})")
 
-    save_3d_results(data_flag, auc, acc, duration, labels, report_str)
+    save_3d_results(data_flag, auc, acc, duration, labels, report_str, train_losses, val_losses)
 
     return {
         "dataset":      data_flag,
@@ -195,6 +198,8 @@ def train_single_3d(
         "duration":     duration,
         "labels":       labels,
         "class_report": report_str,
+        "train_losses": train_losses,
+        "val_losses":   val_losses,
     }
 
 
@@ -220,7 +225,8 @@ def train_all_3d(lr=DEFAULT_LR, force_retrain=False):
             tqdm.write(f"\n  [{flag}] ERROR: {e}")
             all_results.append({
                 "dataset": flag, "auc": None, "accuracy": None,
-                "method": "cnn3d", "duration": "—", "labels": {}, "class_report": str(e),
+                "method": "cnn3d", "duration": "—", "labels": {},
+                "class_report": str(e), "train_losses": [], "val_losses": [],
             })
 
     total_elapsed  = time.time() - total_start
