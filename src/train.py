@@ -1,320 +1,141 @@
-# train.py - Main training script for the biomedical image classifier.
-# This is where we load the datasets, extract features, train the logistic regression model, and evaluate it. 
-# We use joblib to run the training in parallel across all datasets, which should speed things up significantly.
-import os
+# train.py
+# Master training script — trains ALL MedMNIST datasets (2D and 3D).
+# Optimized for: RTX 4090 (24 GB VRAM) | Ryzen 9 5900X (12C/24T) | 128 GB RAM. change batch sizes and epochs in train2d.py and train3d.py if you have different hardware.
+#
+# 2D results → models_2d/
+# 3D results → models_3d/
+
 import time
 import warnings
-import numpy as np
-import joblib
 import winsound
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.multioutput import MultiOutputClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.exceptions import ConvergenceWarning
-
-from medmnist import INFO
 from tqdm import tqdm
 
-from utils import load_dataset, dataset_to_arrays
-from features import extract_features, is_3d
-from cnn import train_cnn
+from train2d import (
+    train_single_2d,
+    already_trained as already_trained_2d,
+    DATASETS_2D,
+)
+from train3d import (
+    train_single_3d,
+    already_trained as already_trained_3d,
+    DATASETS_3D,
+)
+from utils import load_dataset
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
-
-MODELS_DIR = "models"
 
 
-# Utility functions for saving/loading results, normalizing labels, computing AUC, and training classical models. These are used in the main training loop to evaluate different methods and keep track of results across datasets.
-def save_results(data_flag, auc, acc, best_method, duration):
-    os.makedirs(MODELS_DIR, exist_ok=True)
-    joblib.dump(
-        {"auc": auc, "acc": acc, "method": best_method, "duration": duration},
-        f"{MODELS_DIR}/{data_flag}_results.joblib",
-    )
-
-
-# Load results from a saved file to avoid retraining models if results are already available.
-def load_results(data_flag):
-    r = joblib.load(f"{MODELS_DIR}/{data_flag}_results.joblib")
-    return r["auc"], r["acc"], r["method"], r["duration"]
-
-
-# Check if results for a given dataset flag already exist. 
-def already_trained(data_flag):
-    return os.path.exists(f"{MODELS_DIR}/{data_flag}_results.joblib")
-
-
-# The main training loop for a single dataset. This function loads the dataset, extracts features, trains both classical models and a CNN, evaluates their performance, and saves the best results. It also handles exceptions and prints out progress and results in a readable format.
-def normalize_labels(y):
-    y = np.asarray(y)
-    if y.ndim == 2 and y.shape[1] == 1:
-        return y.reshape(-1)
-    return y
-
-
-# Check if the target labels are multi-label or single-label. This is important for choosing the right evaluation metrics and model configurations.
-def is_multi_label_target(y):
-    y = np.asarray(y)
-    return y.ndim == 2 and y.shape[1] > 1
-
-
-# Compute AUC for both multi-label and single-label classification. For multi-label, we use macro averaging. For single-label, we handle both binary and multi-class cases appropriately.
-def compute_auc(y_true, y_probs, multi_label):
-    y_true = np.asarray(y_true)
-
-    if multi_label:
-        return roc_auc_score(y_true, y_probs, average="macro")
-
-    y_true = normalize_labels(y_true)
-    classes = np.unique(y_true)
-
-    if len(classes) == 2:
-        return roc_auc_score(y_true, y_probs[:, 1])
-
-    return roc_auc_score(y_true, y_probs, multi_class="ovr", average="macro")
-
-
-# This function handles the training of both logistic regression and random forest models for a given set of features. It returns the predicted probabilities and class labels for the validation set, which are then used to compute AUC and accuracy.
-def probs_from_model(clf, Xva, multi_label):
-    probs = clf.predict_proba(Xva)
-    if multi_label:
-        # MultiOutputClassifier returns a list of per-label probability arrays
-        return np.column_stack([p[:, 1] for p in probs])
-    return probs
-
-
-# The train_logistic function trains a logistic regression model on the given features and returns the predicted probabilities and class labels for the validation set. It handles both multi-label and single-label cases, and uses a pipeline to standardize features before training.
-def train_logistic(Xtr, y_train, Xva, multi_label, max_iter):
-    print("    Training logistic regression...")
-
-    if multi_label:
-        base = Pipeline(
-            steps=[
-                ("scaler", StandardScaler()),
-                (
-                    "clf",
-                    LogisticRegression(
-                        C=1.0,
-                        solver="saga",
-                        max_iter=max_iter,
-                        tol=1e-3,
-                        random_state=42,
-                        n_jobs=1,
-                    ),
-                ),
-            ]
-        )
-        clf = MultiOutputClassifier(base, n_jobs=-1)
-    else:
-        clf = Pipeline(
-            steps=[
-                ("scaler", StandardScaler()),
-                (
-                    "clf",
-                    LogisticRegression(
-                        C=1.0,
-                        solver="lbfgs",
-                        max_iter=max_iter,
-                        tol=1e-3,
-                        random_state=42,
-                    ),
-                ),
-            ]
-        )
-
-    clf.fit(Xtr, y_train)
-    probs = probs_from_model(clf, Xva, multi_label)
-    preds = clf.predict(Xva)
-    return probs, preds
-
-
-#
-def train_random_forest(Xtr, y_train, Xva, multi_label):
-    print("    Training random forest...")
-
-    base = RandomForestClassifier(
-        n_estimators=200,
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced_subsample",
-    )
-
-    if multi_label:
-        clf = MultiOutputClassifier(base, n_jobs=1)
-    else:
-        clf = base
-
-    clf.fit(Xtr, y_train)
-    probs = probs_from_model(clf, Xva, multi_label)
-    preds = clf.predict(Xva)
-    return probs, preds
-
-
-# The extract_features function is a wrapper around the feature extraction process, which can handle both flat pixel features and HOG features. It also applies PCA for dimensionality reduction if specified. This function is called from the training code to process the datasets before training the logistic regression model.
-def train_classical_models(X_train, y_train, X_val, y_val, method, multi_label, max_iter):
-    Xtr, Xva, _ = extract_features(
-        X_train,
-        X_val,
-        X_val,
-        n_components=100,
-        method=method,
-    )
-
-    results = {}
-
-    print(f"    [{method}] Logistic regression...")
-    log_probs, log_preds = train_logistic(Xtr, y_train, Xva, multi_label, max_iter)
-    results[f"{method}+logistic"] = (
-        compute_auc(y_val, log_probs, multi_label),
-        accuracy_score(y_val, log_preds),
-    )
-
-    print(f"    [{method}] Random forest...")
-    rf_probs, rf_preds = train_random_forest(Xtr, y_train, Xva, multi_label)
-    results[f"{method}+rf"] = (
-        compute_auc(y_val, rf_probs, multi_label),
-        accuracy_score(y_val, rf_preds),
-    )
-
-    return results
-
-
-# The train_single function handles the training loop for a single dataset, including data preparation, model training, and evaluation. It returns the predicted probabilities and class labels for the validation set, which can then be used to calculate AUC and accuracy.
-def train_single(data_flag):
-    if already_trained(data_flag):
-        print(f"  [{data_flag}] Already trained — loading saved results...")
-        auc, acc, best_method, duration = load_results(data_flag)
-        print(f"  [{data_flag}] AUC: {auc:.4f}, Accuracy: {acc:.4f} ({best_method})")
-        return (data_flag, auc, acc, best_method, duration, None)
-
-    try:
-        print(f"\n{'='*50}")
-        print(f"  [{data_flag}] Starting...")
-        print(f"{'='*50}")
-
-        print(f"  [{data_flag}] Loading data...")
-        train_ds, val_ds, _ = load_dataset(data_flag)
-
-        X_train, y_train = dataset_to_arrays(train_ds, "train", data_flag)
-        X_val, y_val = dataset_to_arrays(val_ds, "val", data_flag)
-
-        y_train = normalize_labels(y_train)
-        y_val = normalize_labels(y_val)
-
-        multi_label = is_multi_label_target(y_train)
-        is_3d_data = is_3d(X_train)
-
-        max_iter = 10000 if data_flag in {
-            "organamnist",
-            "organcmnist",
-            "organsmnist",
-            "chestmnist",
-        } else 3000
-
-        start = time.time()
-        candidates = []
-
-        if is_3d_data:
-            print(f"  [{data_flag}] 3D data — running CNN...")
-            cnn_probs, cnn_preds = train_cnn(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                is_3d_data=True,
-                multi_label=multi_label,
-            )
-            cnn_auc = compute_auc(y_val, cnn_probs, multi_label)
-            cnn_acc = accuracy_score(y_val, cnn_preds)
-            candidates.append((cnn_auc, cnn_acc, "cnn3d"))
-
-        else:
-            print(f"  [{data_flag}] Running flat features...")
-            flat_results = train_classical_models(
-                X_train, y_train, X_val, y_val, "flat", multi_label, max_iter
-            )
-            for name, (auc, acc) in flat_results.items():
-                candidates.append((auc, acc, name))
-
-            print(f"  [{data_flag}] Running HOG features...")
-            hog_results = train_classical_models(
-                X_train, y_train, X_val, y_val, "hog", multi_label, max_iter
-            )
-            for name, (auc, acc) in hog_results.items():
-                candidates.append((auc, acc, name))
-
-            print(f"    [cnn] Running CNN once...")
-            cnn_probs, cnn_preds = train_cnn(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                is_3d_data=False,
-                multi_label=multi_label,
-            )
-            cnn_auc = compute_auc(y_val, cnn_probs, multi_label)
-            cnn_acc = accuracy_score(y_val, cnn_preds)
-            candidates.append((cnn_auc, cnn_acc, "cnn"))
-
-        best_auc, best_acc, best_method = max(candidates, key=lambda x: x[0])
-
-        elapsed = time.time() - start
-        minutes = int(elapsed // 60)
-        seconds = int(elapsed % 60)
-        duration = f"{minutes}m {seconds}s"
-
-        print(
-            f"  [{data_flag}] Done — {best_method} won — "
-            f"AUC: {best_auc:.4f}, Accuracy: {best_acc:.4f} ({duration})"
-        )
-
-        save_results(data_flag, best_auc, best_acc, best_method, duration)
-        return (data_flag, best_auc, best_acc, best_method, duration, None)
-
-    except Exception as e:
-        print(f"  [{data_flag}] ERROR: {e}")
-        return (data_flag, None, None, None, None, str(e))
-
-# Main entry point for training all datasets sequentially. This loop iterates through all dataset flags, checks if results already exist, and if not, it calls the train_single function to perform the training and evaluation. It also keeps track of results and prints a summary at the end.
-if __name__ == "__main__":
-    all_flags = list(INFO.keys())
+def main():
     total_start = time.time()
 
-    print("=" * 64)
-    print(" MedMNIST Classifier Pipeline")
-    print("=" * 64)
+    flags_2d = list(DATASETS_2D.keys())
+    flags_3d = list(DATASETS_3D.keys())
 
-    print("\n[1/3] Preparing datasets...")
-    for flag in tqdm(all_flags, desc="Checking datasets", unit="dataset"):
+    print("=" * 72)
+    print("  MedMNIST Master Training Pipeline")
+    print("  RTX 4090 | CNN only | 2D → models_2d/  3D → models_3d/")
+    print("=" * 72)
+    print(f"  2D datasets : {len(flags_2d)}")
+    print(f"  3D datasets : {len(flags_3d)}")
+    print(f"  Total       : {len(flags_2d) + len(flags_3d)}")
+
+    # if model exists, skip training and load results
+    all_flags = flags_2d + flags_3d
+    print(f"\n[1/3] Pre-downloading all {len(all_flags)} datasets (skips if cached)...")
+    for flag in tqdm(all_flags, desc="Downloading", unit="dataset"):
         load_dataset(flag)
 
-    print("\n[2/3] Training all datasets sequentially...")
-    results = []
-    for flag in all_flags:
-        result = train_single(flag)
-        results.append(result)
+    # train 2D datasets
+    print(f"\n[2/3] Training {len(flags_2d)} 2D datasets  →  models_2d/")
+    print("  " + "-" * 68)
+    for flag in flags_2d:
+        meta   = DATASETS_2D[flag]
+        status = "✓ cached" if already_trained_2d(flag) else "needs training"
+        print(
+            f"  {flag:<20} {meta['task']:<14} "
+            f"batch={meta['batch']}  epochs={meta['epochs']}  [{status}]"
+        )
 
-    total_elapsed = time.time() - total_start
-    total_min = int(total_elapsed // 60)
-    total_sec = int(total_elapsed % 60)
+    results_2d = []
+    for flag in tqdm(flags_2d, desc="2D datasets", unit="dataset"):
+        try:
+            result = train_single_2d(flag, lr=3e-4)
+            results_2d.append((
+                flag, result["auc"], result["accuracy"],
+                "cnn2d", result["duration"], None,
+            ))
+        except Exception as e:
+            print(f"\n  [{flag}] ERROR: {e}")
+            results_2d.append((flag, None, None, "cnn2d", "—", str(e)))
 
-    # this make a sound to tell you that the code is done. (it takes a while to train everything)
-    winsound.Beep(500, 800)
+    # train 3D datasets
+    print(f"\n[3/3] Training {len(flags_3d)} 3D datasets  →  models_3d/")
+    print("  " + "-" * 68)
+    for flag in flags_3d:
+        meta   = DATASETS_3D[flag]
+        status = "✓ cached" if already_trained_3d(flag) else "needs training"
+        print(
+            f"  {flag:<25} {meta['task']:<15} "
+            f"{meta['n_classes']} cls  [{status}]"
+        )
 
-    print("\n[3/3] Results")
-    print("=" * 64)
-    print(f"{'Dataset':<25} {'AUC':>8} {'Accuracy':>10} {'Method':>16} {'Train Time':>12}")
-    print("-" * 64)
-    for flag, auc, acc, method, duration, err in sorted(results):
-        if err:
-            print(f"{flag:<25} ERROR: {err}")
-        else:
-            print(f"{flag:<25} {auc:>8.4f} {acc:>10.4f} {method:>16} {duration:>12}")
-    print("=" * 64)
-    print(f" Total time: {total_min}m {total_sec}s")
-    print("=" * 64)
+    results_3d = []
+    for flag in tqdm(flags_3d, desc="3D datasets", unit="dataset"):
+        try:
+            result = train_single_3d(
+                flag,
+                epochs=50,
+                batch_size=32,
+                lr=3e-4,
+            )
+            results_3d.append((
+                flag, result["auc"], result["accuracy"],
+                "cnn3d", result["duration"], None,
+            ))
+        except Exception as e:
+            print(f"\n  [{flag}] ERROR: {e}")
+            results_3d.append((flag, None, None, "cnn3d", "—", str(e)))
+
+    # summary
+    total_elapsed  = time.time() - total_start
+    total_duration = f"{int(total_elapsed // 60)}m {int(total_elapsed % 60)}s"
+
+    def print_table(title, rows):
+        print(f"\n{'=' * 72}")
+        print(f"  {title}")
+        print(f"{'=' * 72}")
+        print(f"  {'Dataset':<25} {'AUC':>8} {'Accuracy':>10} {'Method':>7} {'Time':>10}")
+        print("  " + "-" * 65)
+        for flag, auc, acc, method, duration, err in sorted(rows):
+            if err:
+                print(f"  {flag:<25} ERROR: {err}")
+            else:
+                print(
+                    f"  {flag:<25} {auc:>8.4f} {acc:>10.4f} "
+                    f"{method:>7} {duration:>10}"
+                )
+        print(f"{'=' * 72}")
+
+    print_table("2D Results  (models_2d/)", results_2d)
+    print_table("3D Results  (models_3d/)", results_3d)
+
+    all_results = results_2d + results_3d
+    good = [r for r in all_results if r[5] is None]
+    bad  = [r for r in all_results if r[5] is not None]
+
+    print(f"\n  Datasets trained successfully : {len(good)}")
+    print(f"  Datasets with errors         : {len(bad)}")
+    print(f"  Total wall-clock time        : {total_duration}")
+
+    # Three-tone completion beep (Windows)
+    try:
+        winsound.Beep(500, 400)
+        winsound.Beep(700, 400)
+        winsound.Beep(900, 600)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()
