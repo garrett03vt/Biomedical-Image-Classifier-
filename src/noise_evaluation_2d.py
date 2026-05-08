@@ -152,7 +152,15 @@ def evaluate_2d_model(model, X_eval, y_eval, multi_label, batch_size=64):
     y_preds = np.concatenate(all_preds, axis=0)
 
     auc = compute_auc(y_eval, y_probs, multi_label)
-    acc = accuracy_score(y_eval, y_preds)
+
+    # Match the official MedMNIST evaluator: mean per-label accuracy for
+    # multi-label tasks (sklearn's accuracy_score on 2-D arrays would otherwise
+    # return subset/exact-match accuracy, which is much harsher).
+    if multi_label:
+        y_eval_arr = np.asarray(y_eval)
+        acc = float(((y_preds == y_eval_arr).mean(axis=0)).mean())
+    else:
+        acc = accuracy_score(y_eval, y_preds)
 
     return auc, acc
 

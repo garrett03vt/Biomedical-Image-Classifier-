@@ -25,18 +25,32 @@ torch.set_float32_matmul_precision("high")
 
 MODELS_DIR = "models_3d"
 
-# fracturemnist3d fixes:
-#   use_class_weights=True — inverse-frequency CE weights for 3 imbalanced classes
-#   strong_augment=True    — 3D flips along all axes + intensity jitter
-#   epochs=150             — small dataset needs more passes
+# Per-dataset notes:
+#   * All 3D datasets are small (1k–10k volumes), so they need real augmentation.
+#     The previous "augment once at dataset construction" was a no-op — fixed
+#     in cnn.py to augment per-sample per-epoch.
+#   * vessel/adrenal/nodule are imbalanced binaries (vessel especially:
+#     ~12% positive), so they get use_class_weights=True.
+#   * fracture (3-class, ~1k volumes) was the only one previously configured;
+#     keep that direction but with the new architecture it needs fewer epochs.
+#   * organ (11-class, 972 train) gets the most aggressive treatment:
+#     hardest task, smallest dataset.
+#   * lr=1e-3 + OneCycleLR works well with the new BatchNorm-heavy 3D ResNet
+#     across all datasets; the previous 3e-4 was too conservative for the
+#     short epoch budget.
 DATASETS_3D = {
-    "adrenalmnist3d":  {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
-    "fracturemnist3d": {"task": "multi-class",   "n_classes": 3,  "batch": 16, "epochs": 150,
-                        "use_class_weights": True, "strong_augment": True},
-    "nodulemnist3d":   {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
-    "organmnist3d":    {"task": "multi-class",   "n_classes": 11, "batch": 32, "epochs": 50},
-    "synapsemnist3d":  {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
-    "vesselmnist3d":   {"task": "binary-class",  "n_classes": 2,  "batch": 32, "epochs": 50},
+    "adrenalmnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
+    "fracturemnist3d": {"task": "multi-class",  "n_classes": 3,  "batch": 32, "epochs": 100, "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3, "label_smoothing": 0.1},
+    "nodulemnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
+    "organmnist3d":    {"task": "multi-class",  "n_classes": 11, "batch": 32, "epochs": 80,  "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3, "label_smoothing": 0.1},
+    "synapsemnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
+                        "strong_augment": True, "weight_decay": 1e-3},
+    "vesselmnist3d":   {"task": "binary-class", "n_classes": 2,  "batch": 32, "epochs": 60,  "lr": 1e-3,
+                        "strong_augment": True, "use_class_weights": True, "weight_decay": 1e-3},
 }
 
 DEFAULT_LR = 3e-4
@@ -99,7 +113,7 @@ def train_single_3d(
     data_flag,
     epochs=None,
     batch_size=None,
-    lr=DEFAULT_LR,
+    lr=None,
     force_retrain=False,
 ):
     if data_flag not in DATASETS_3D:
@@ -108,6 +122,7 @@ def train_single_3d(
     meta       = DATASETS_3D[data_flag]
     batch_size = batch_size if batch_size is not None else meta["batch"]
     epochs     = epochs     if epochs     is not None else meta["epochs"]
+    lr         = lr         if lr         is not None else meta.get("lr", DEFAULT_LR)
 
     if not force_retrain and already_trained(data_flag):
         tqdm.write(f"  [{data_flag}] Already trained — loading saved result...")
@@ -160,6 +175,7 @@ def train_single_3d(
         use_class_weights=meta.get("use_class_weights", False),
         strong_augment=meta.get("strong_augment", False),
         label_smoothing=meta.get("label_smoothing", 0.0),
+        weight_decay=meta.get("weight_decay", 1e-2),
     )
 
     elapsed  = time.time() - start_time

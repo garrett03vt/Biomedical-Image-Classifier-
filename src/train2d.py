@@ -40,16 +40,25 @@ MODELS_DIR = "models_2d"
 #   epochs=200             — tiny dataset needs many passes
 DATASETS_2D = {
     "pathmnist":      {"task": "multi-class",  "n_classes": 9,  "n_train": 89996,  "batch": 512, "epochs": 30},
-    "chestmnist":     {"task": "multi-label",  "n_classes": 14, "n_train": 78468,  "batch": 256, "epochs": 80,
-                       "use_pos_weight": True, "tune_threshold": True, "lr": 1e-4, "strong_augment": True},
+    # chestmnist (multi-label, 14 sparse binary labels):
+    # The official MedMNIST metric is mean per-label accuracy at threshold 0.5
+    # (NOT subset/exact-match accuracy). On this very sparse dataset, the model
+    # that wins is a well-regularised ResNet trained with plain BCE — pos_weight
+    # and per-label F1 threshold tuning push the model towards more positive
+    # predictions, which helps F1/recall but hurts mean accuracy because false
+    # positives dominate. The official ResNet-18 baseline hits ~0.947 with
+    # plain BCE + light augmentation + threshold 0.5, so we mirror that.
+    "chestmnist":     {"task": "multi-label", "n_classes": 14, "n_train": 78468, "batch": 256, "epochs": 50,
+                       "use_pos_weight": False, "tune_threshold": False,
+                       "strong_augment": False, "lr": 1e-3, "weight_decay": 1e-4},
     "dermamnist":     {"task": "multi-class",  "n_classes": 7,  "n_train": 7007,   "batch": 256, "epochs": 30,
                        "strong_augment": True},
     "octmnist":       {"task": "multi-class",  "n_classes": 4,  "n_train": 97477,  "batch": 512, "epochs": 20},
     "pneumoniamnist": {"task": "binary-class", "n_classes": 2,  "n_train": 4708,   "batch": 128, "epochs": 50},
     "retinamnist":    {"task": "ordinal-reg",  "n_classes": 5,  "n_train": 1080,   "batch": 32,  "epochs": 200,
                        "use_class_weights": True, "strong_augment": True, "label_smoothing": 0.1},
-    "breastmnist":    {"task": "binary-class", "n_classes": 2,  "n_train": 546,    "batch": 32,  "epochs": 150,
-                       "lr": 5e-5},
+    "breastmnist":    {"task": "binary-class", "n_classes": 2, "n_train": 546, "batch": 32, "epochs": 150, 
+                        "lr": 5e-5, "weight_decay": 1e-2}, # Heavy decay for tiny dataset,
     "bloodmnist":     {"task": "multi-class",  "n_classes": 8,  "n_train": 11959,  "batch": 256, "epochs": 50},
     "tissuemnist":    {"task": "multi-class",  "n_classes": 8,  "n_train": 165466, "batch": 512, "epochs": 50},
     "organamnist":    {"task": "multi-class",  "n_classes": 11, "n_train": 34561,  "batch": 256, "epochs": 40},
@@ -82,6 +91,28 @@ def compute_auc(y_true, y_probs, multi_label):
     if len(classes) == 2:
         return roc_auc_score(y_true, y_probs[:, 1])
     return roc_auc_score(y_true, y_probs, multi_class="ovr", average="macro")
+
+
+def compute_accuracy(y_true, y_preds, multi_label):
+    """
+    Match the official MedMNIST evaluator:
+      * multi-label  -> mean per-label accuracy (averaged over the L labels)
+      * single-label -> standard sample accuracy
+
+    sklearn's accuracy_score on 2-D arrays returns subset (exact-match) accuracy,
+    which is far stricter than what MedMNIST reports — for chestmnist that
+    collapses scores from ~0.95 down to ~0.37. We replicate the official
+    formula here so our numbers line up with the benchmark tables.
+    """
+    y_true  = np.asarray(y_true)
+    y_preds = np.asarray(y_preds)
+
+    if multi_label:
+        # y_true and y_preds are (N, L) binary arrays
+        per_label_acc = (y_preds == y_true).mean(axis=0)
+        return float(per_label_acc.mean())
+
+    return float(accuracy_score(normalize_labels(y_true), y_preds))
 
 
 def _path(data_flag):
@@ -178,13 +209,14 @@ def train_single_2d(
         strong_augment=meta.get("strong_augment", False),
         label_smoothing=meta.get("label_smoothing", 0.0),
         tune_threshold=meta.get("tune_threshold", False),
+        weight_decay=meta.get("weight_decay", 1e-2),
     )
 
     elapsed  = time.time() - start_time
     duration = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
 
     auc = compute_auc(y_val, y_probs, multi_label)
-    acc = accuracy_score(y_val, y_preds)
+    acc = compute_accuracy(y_val, y_preds, multi_label)
 
     report_str = classification_report(
         y_val, y_preds, target_names=label_names, zero_division=0
