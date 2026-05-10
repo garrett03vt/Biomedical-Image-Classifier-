@@ -86,11 +86,11 @@ def diagnose(train_losses, val_losses):
     return "OK"
 
 
-def plot_loss_curve(ax, train_losses, val_losses, title, diagnosis):
+def plot_loss_curve(ax, train_losses, val_losses, title, diagnosis, fontsize_scale=1.0):
     epochs = range(1, len(train_losses) + 1)
 
-    ax.plot(epochs, train_losses, label="Train loss", linewidth=1.8, color="#2196F3")
-    ax.plot(epochs, val_losses,   label="Val loss",   linewidth=1.8, color="#F44336", linestyle="--")
+    ax.plot(epochs, train_losses, label="Train loss", linewidth=2.0, color="#2196F3")
+    ax.plot(epochs, val_losses,   label="Val loss",   linewidth=2.0, color="#F44336", linestyle="--")
 
     # Shade the gap between curves
     ax.fill_between(epochs, train_losses, val_losses,
@@ -103,27 +103,28 @@ def plot_loss_curve(ax, train_losses, val_losses, title, diagnosis):
     color_map = {"OK": "#4CAF50", "OVERFITTING": "#F44336", "UNDERFITTING": "#FF9800", "no data": "#9E9E9E"}
     color = color_map.get(diagnosis, "#9E9E9E")
 
-    ax.set_title(f"{title}\n[{diagnosis}]", fontsize=9, color=color, fontweight="bold")
-    ax.set_xlabel("Epoch", fontsize=8)
-    ax.set_ylabel("Loss", fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.legend(fontsize=7)
+    s = fontsize_scale
+    ax.set_title(f"{title}\n[{diagnosis}]",
+                 fontsize=int(11 * s), color=color, fontweight="bold")
+    ax.set_xlabel("Epoch", fontsize=int(10 * s))
+    ax.set_ylabel("Loss", fontsize=int(10 * s))
+    ax.tick_params(labelsize=int(9 * s))
+    ax.legend(fontsize=int(9 * s))
     ax.grid(True, alpha=0.3)
 
 
-def make_grid_plot(results, title, output_path):
+def make_grid_plot(results, title, output_path, ncols=4, fontsize_scale=1.0):
     n = len(results)
     if n == 0:
         print(f"  No results to plot for: {title}")
         return
 
-    ncols = min(4, n)
+    ncols = min(ncols, n)
     nrows = (n + ncols - 1) // ncols
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5, nrows * 4))
-    fig.suptitle(title, fontsize=13, fontweight="bold", y=1.01)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 5.5, nrows * 4.2))
+    fig.suptitle(title, fontsize=int(14 * fontsize_scale), fontweight="bold", y=1.01)
 
-    # Flatten axes — handle single row/col edge cases
     if nrows == 1 and ncols == 1:
         axes = [[axes]]
     elif nrows == 1:
@@ -142,17 +143,69 @@ def make_grid_plot(results, title, output_path):
         diag         = diagnose(train_losses, val_losses)
 
         plot_label = f"{dataset}\nAUC={auc:.3f}  Acc={acc:.3f}"
-        plot_loss_curve(flat_axes[i], train_losses, val_losses, plot_label, diag)
+        plot_loss_curve(flat_axes[i], train_losses, val_losses, plot_label, diag,
+                        fontsize_scale=fontsize_scale)
 
-    # Hide unused axes
     for j in range(len(results), len(flat_axes)):
         flat_axes[j].set_visible(False)
 
     fig.tight_layout()
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {output_path}")
+
+
+def make_individual_plots(results, suffix, subdir):
+    """One PNG per dataset — fully report-ready, large fonts, no grid."""
+    if not results:
+        return
+    out_dir = os.path.join(OUTPUT_DIR, subdir)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"  Per-dataset plots → {out_dir}/")
+    for r in results:
+        train_losses = r.get("train_losses", [])
+        val_losses   = r.get("val_losses",   [])
+        if not train_losses or not val_losses:
+            continue
+        dataset = r.get("dataset", "unknown")
+        auc = r.get("auc", float("nan"))
+        acc = r.get("accuracy", float("nan"))
+        diag = diagnose(train_losses, val_losses)
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        plot_loss_curve(
+            ax, train_losses, val_losses,
+            f"{dataset}  |  AUC={auc:.3f}  Acc={acc:.3f}",
+            diag,
+            fontsize_scale=1.4,
+        )
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"{dataset}_loss_curve.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    print(f"    Wrote {len(results)} files into {out_dir}/")
+
+
+def make_split_grids(results, title_base, file_base, ncols=2, per_grid=4):
+    """
+    Split a long results list into multiple smaller grids.
+    With per_grid=4 and ncols=2 you get 2x2 grids — each subplot is large
+    enough to be readable when the figure is scaled to a report column.
+    """
+    if not results:
+        return
+    chunks = [results[i:i + per_grid] for i in range(0, len(results), per_grid)]
+    print(f"  Split into {len(chunks)} smaller grid(s) of up to {per_grid} datasets each")
+    for idx, chunk in enumerate(chunks, start=1):
+        out_path = os.path.join(OUTPUT_DIR, f"{file_base}_part{idx}.png")
+        make_grid_plot(
+            chunk,
+            f"{title_base} (part {idx} of {len(chunks)})",
+            out_path,
+            ncols=ncols,
+            fontsize_scale=1.3,
+        )
 
 
 def make_summary_plot(all_results, output_path):
@@ -245,7 +298,15 @@ def main():
                 results_2d,
                 "2D CNN — Train vs Val Loss Curves",
                 os.path.join(OUTPUT_DIR, "loss_curves_2d.png"),
+                ncols=4, fontsize_scale=1.0,
             )
+            make_split_grids(
+                results_2d,
+                "2D CNN — Train vs Val Loss Curves",
+                "loss_curves_2d_split",
+                ncols=2, per_grid=4,
+            )
+            make_individual_plots(results_2d, "2d", "individual_2d")
 
     if mode in ("all", "3d"):
         results_3d = load_all_results(MODELS_3D_DIR, "3D")
@@ -254,7 +315,15 @@ def main():
                 results_3d,
                 "3D CNN — Train vs Val Loss Curves",
                 os.path.join(OUTPUT_DIR, "loss_curves_3d.png"),
+                ncols=3, fontsize_scale=1.0,
             )
+            make_split_grids(
+                results_3d,
+                "3D CNN — Train vs Val Loss Curves",
+                "loss_curves_3d_split",
+                ncols=2, per_grid=4,
+            )
+            make_individual_plots(results_3d, "3d", "individual_3d")
 
     all_results = results_2d + results_3d
 
