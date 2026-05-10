@@ -1,0 +1,13 @@
+Dataset,AUC,Accuracy,Method,Duration
+bloodmnist,0.9986,0.9667,cnn2d,0m 36s
+breastmnist,0.8839,0.8590,cnn2d,0m 7s
+chestmnist,0.7543,0.9493,cnn2d,2m 11s
+dermamnist,0.9229,0.7507,cnn2d,0m 18s
+octmnist,0.9749,0.9241,cnn2d,2m 14s
+organamnist,0.9977,0.9231,cnn2d,0m 42s
+organcmnist,0.9949,0.8855,cnn2d,0m 15s
+organsmnist,0.9925,0.8919,cnn2d,0m 36s
+pathmnist,0.9998,0.9918,cnn2d,3m 13s
+pneumoniamnist,0.9911,0.9656,cnn2d,0m 8s
+retinamnist,0.7942,0.5417,cnn2d,0m 26s
+tissuemnist,0.9089,0.6284,cnn2d,5m 9s

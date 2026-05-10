@@ -1,0 +1,7 @@
+Dataset,AUC,Accuracy,Method,Duration
+adrenalmnist3d,0.8732,0.8980,cnn3d,1m 16s
+fracturemnist3d,0.7070,0.5243,cnn3d,1m 25s
+nodulemnist3d,0.8800,0.8606,cnn3d,1m 11s
+organmnist3d,0.9897,0.8820,cnn3d,1m 7s
+synapsemnist3d,0.8496,0.7966,cnn3d,0m 49s
+vesselmnist3d,0.9330,0.9267,cnn3d,0m 53s
