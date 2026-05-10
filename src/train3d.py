@@ -24,35 +24,6 @@ cudnn.deterministic = False
 torch.set_float32_matmul_precision("high")
 
 MODELS_DIR = "models_3d"
-
-# Per-dataset notes:
-#   * v1 (lr=1e-3, wd=1e-3, dropout=0.5, batch=32) was over-regularised and
-#     adrenalmnist3d had AUC < 0.5 from class_weights interacting badly with
-#     augmentation.
-#   * v2 (lr=3e-4, wd=1e-4, dropout=0.3, batch=16, no class_weights) fixed
-#     the underfitting on most datasets but left two issues:
-#       - fracturemnist3d still underfit (3-class task on ~1k volumes is
-#         genuinely hard). label_smoothing=0.1 was raising the CE floor and
-#         hurting fit; removed it and bumped epochs 150 -> 200 so cosine
-#         decay has more runway.
-#       - synapsemnist3d flipped to overfitting (val/train gap 0.25). Bumped
-#         weight_decay to 5e-4 — middle ground between v1 and v2.
-#   * organmnist3d's "UNDERFITTING" diagnosis is a false alarm: with 11
-#     classes and label_smoothing=0.1 the CE loss floor is ~0.36, so train
-#     loss of 0.73 is fine. AUC 0.99 / Acc 0.84 is the actual signal.
-#   * MedMNIST3DDataset (in cnn.py) augments per-sample per-epoch.
-#   * organmnist3d has laterality labels ("kidney-left" vs "kidney-right"
-#     etc.). flip_axes=(1,) restricts random flips to the depth axis only,
-#     because a left-right or front-back flip would silently relabel the
-#     volume — the model would be trained on lies. All other 3D datasets
-#     can flip on all three spatial axes safely.
-#   * Convention after channel-first transpose:
-#       axis 1 = depth (axial / head-foot)
-#       axis 2 = height (anterior-posterior)
-#       axis 3 = width  (left-right)        ← skip for organmnist3d
-#   * GroupNorm + AMP off (handled inside cnn.py) — fixes the
-#     train/eval BatchNorm stats mismatch that was driving val loss to 28+
-#     while train loss looked normal.
 DATASETS_3D = {
     "adrenalmnist3d":  {"task": "binary-class", "n_classes": 2,  "batch": 16, "epochs": 100, "lr": 3e-4,
                         "strong_augment": True, "weight_decay": 1e-4,

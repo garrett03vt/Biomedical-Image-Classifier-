@@ -1,6 +1,9 @@
 # src/noise_evaluation_3d.py
 # Train a 3D CNN on clean volumes, then evaluate on clean and noisy validation volumes.
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import os
 import csv
 import time

@@ -1,6 +1,9 @@
 # src/noise_evaluation_2d.py
 # Train a 2D CNN on clean images, then evaluate on clean and noisy validation images.
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import os
 import csv
 import time

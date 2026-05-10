@@ -8,9 +8,14 @@
 import sys
 import time
 import warnings
-import winsound
 
 from tqdm import tqdm
+
+
+try:
+    import winsound
+except ImportError:
+    winsound = None
 
 from train2d import train_single_2d, already_trained as already_trained_2d, DATASETS_2D
 from train3d import train_single_3d, already_trained as already_trained_3d, DATASETS_3D

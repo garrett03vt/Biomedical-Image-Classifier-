@@ -3,6 +3,9 @@
 # Shows a 20×20 grid of sample images for a chosen label.
 # No files are saved — the grid pops up on screen.
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import numpy as np
 import matplotlib
 matplotlib.use("TkAgg")

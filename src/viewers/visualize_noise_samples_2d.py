@@ -1,8 +1,11 @@
-# src/test_noise_2d.py
+# src/viewers/visualize_noise_samples_2d.py
 # Visualize noise injection on one 2D MedMNIST dataset.
 
-from src.utils import load_dataset, dataset_to_arrays
-from src.noise import (
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from utils import load_dataset, dataset_to_arrays
+from noise import (
     add_gaussian_noise,
     add_salt_pepper_noise,
     add_speckle_noise,

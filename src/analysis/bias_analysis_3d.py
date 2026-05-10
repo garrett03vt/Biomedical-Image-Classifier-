@@ -1,6 +1,9 @@
 # src/bias_analysis_3d.py
 # Analyze label distribution for 3D MedMNIST datasets.
 
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import os
 import csv
 import numpy as np
