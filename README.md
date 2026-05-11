@@ -66,7 +66,8 @@ RTX 4090. CPU-only training is feasible but will take 24+ hours.
 ## Reproducing the paper
 
 The full pipeline runs as four steps. Each later step depends on the previous
-one's outputs.
+one's outputs. If you wish to reproduce the models, you will need to delete the 
+saved models in "models_2d" and "models_3d"
 
 ### 1. Sanity check (recommended first step)
 
